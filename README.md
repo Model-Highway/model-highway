@@ -1,112 +1,263 @@
 # Model Highway
 
-Self-hosted orchestration for serving local LLMs across a fleet of personal computers.
+Self-hosted orchestration for serving local LLMs across a heterogeneous fleet of
+personal computers.
 
-> **Status:** Early design. The repository currently contains project documentation only; the runtime is not implemented yet.
+> **Status:** Architecture and feasibility planning. The repository currently
+> contains documentation only; the runtime is not implemented yet.
 
 ## Why
 
-A powerful home lab often has several computers with different CPUs, GPUs, operating systems, model files, and power states. Using them as one inference resource should not require manually remembering which machine has which model or whether that machine is awake.
+A home lab may contain Macs and Linux machines with different CPUs, GPUs,
+runtimes, model files, network paths, and power states. Using them as one
+inference resource should not require remembering which machine has a model,
+whether it is awake, or which endpoint is reachable.
 
-Model Highway will provide one stable way to request a model while the system discovers the best available computer, wakes it when possible, starts the required serving runtime, and routes the request over the local network or Tailscale.
+Model Highway will provide a stable CLI and API for discovering the fleet,
+preparing a selected node and model, and routing inference through a ready local
+runtime. It will prefer private LAN paths where verified, use Tailscale for
+remote access or fallback paths, and use an authenticated LAN relay for
+Wake-on-LAN when needed.
+
+## Delivery order
+
+The project is deliberately **CLI first**:
+
+1. validate the architecture and actual fleet;
+2. deliver a functional CLI vertical slice against one runtime;
+3. add authenticated agents, durable state, and model polling;
+4. add multi-node scheduling, LAN/Tailscale selection, and lifecycle control;
+5. stabilize the management API;
+6. build native UIs in separate repositories.
+
+The CLI is the first client of the same versioned management API that future
+native clients will use. It will not bypass the API to read the database or
+reuse control-plane internals.
+
+See [`docs/PLAN.md`](docs/PLAN.md) for decisions, milestone gates, acceptance
+criteria, and the testing strategy.
 
 ## Planned capabilities
 
 - Register computers as nodes in a personal inference fleet.
-- Poll node health, hardware, runtimes, and installed models.
-- Expose a stable OpenAI-compatible API.
-- Select a node based on model compatibility, reachability, load, and policy.
-- Prefer direct LAN communication when available.
-- Use Tailscale for remote access without exposing model servers publicly.
-- Send Wake-on-LAN packets through an always-on device when an eligible node is asleep.
-- Wait for the node and model server to become ready before routing traffic.
-- Start, stop, and unload model-serving processes through runtime adapters.
-- Show which node handled a request and why it was selected.
+- Poll node health, runtime servers, and installed model placements.
+- Retain last-known offline and stale state without treating it as ready.
+- Expose a versioned management API for the CLI and later UIs.
+- Expose a supported OpenAI-compatible inference subset.
+- Explicitly prepare a selected node/model pair through a durable operation.
+- Route requests only to fresh, healthy, model-ready placements.
+- Support automatic deterministic placement while preserving explicit node
+  selection.
+- Prefer verified LAN endpoints for each service.
+- Fall back to service-specific Tailscale endpoints before request commitment.
+- Send Wake-on-LAN directly on the target subnet or through an authenticated
+  relay on that LAN.
+- Start, stop, drain, and unload model-serving processes through allowlisted
+  runtime adapters.
+- Show which node handled a request and why it was selected or rejected.
 
-## How a request will work
+The first release will route each request to one machine. It will not split one
+model or request across computers.
 
-1. A client requests a model through the gateway.
-2. The scheduler finds a healthy node advertising that model.
-3. If the best node is already ready, the request is routed immediately.
-4. If the node is asleep, a LAN-side relay sends a Wake-on-LAN packet.
-5. The node agent reconnects and starts the required model runtime.
-6. The gateway polls readiness and forwards the request once the model is available.
-7. Streaming output is returned through the same stable gateway endpoint.
+## CLI-first user experience
 
-The first version will route each request to one machine. It will not split a single model or request across multiple computers.
+The CLI grows through the milestones. Its initial and planned commands include:
+
+```text
+model-highwayctl config init
+model-highwayctl health
+model-highwayctl nodes add ...
+model-highwayctl nodes list
+model-highwayctl nodes describe <id>
+model-highwayctl models list
+model-highwayctl models refresh
+model-highwayctl serve <node> <model>
+```
+
+`serve` starts an explicit asynchronous lifecycle operation and returns an
+operation ID. The CLI follows transitions such as:
+
+```text
+planned
+  -> waking
+  -> agent-online
+  -> runtime-starting
+  -> model-loading
+  -> ready
+```
+
+Initially, inference requests route only to ready placements. They will not
+silently remain open through a cold boot or model load. Automatic
+request-triggered wake may be considered later as an opt-in policy after timeout
+and retry behavior is proven.
 
 ## Architecture
 
 ```text
-                           +----------------------+
-  OpenAI-compatible       |  Control plane       |
-  client ---------------->|  API + scheduler     |
-                           |  registry + gateway  |
-                           +----------+-----------+
-                                      |
-                    LAN or Tailscale | authenticated control
-                                      |
-             +------------------------+------------------------+
-             |                         |                        |
-       +-----v-----+             +-----v-----+            +-----v-----+
-       | Node agent |             | Node agent |            | WoL relay |
-       | Runtime A  |             | Runtime B  |            | (optional)|
-       +-----+------+             +-----+------+            +-----------+
-             |                          |
-       Local model server         Local model server
+                         Client to gateway
+                     LAN or Tailscale, authenticated
+                                   |
+                                   v
+                     +---------------------------+
+                     | Control plane             |
+                     | management API + catalog  |
+                     | scheduler + lifecycle     |
+                     | OpenAI-compatible gateway |
+                     +-------------+-------------+
+                                   |
+                +------------------+------------------+
+                |                                     |
+      Agent outbound HTTP/SSE              Gateway to runtime
+        LAN or Tailscale                   LAN or Tailscale
+                |                                     |
+        +-------v-------+                     +-------v-------+
+        | Node agent    |---- local control ->| Model runtime |
+        +---------------+                     +---------------+
+
+Control plane -- direct subnet-local WoL ------------------+
+                                                          +--> sleeping node
+Control plane -- authenticated relay -- subnet-local WoL --+
 ```
+
+Networking is modeled per service. An address that reaches an agent does not
+imply that a model runtime is reachable. A remote client may reach the gateway
+through Tailscale while the gateway still uses a verified LAN path to the
+selected runtime.
 
 ### Control plane
 
-Maintains node and model state, selects a serving node, exposes the client API, manages lifecycle commands, and records health and routing information.
+Maintains durable node, runtime, model, command, lifecycle, configuration, and
+audit state. It exposes two API families:
+
+- `/api/v1/...` for management, catalog, lifecycle, events, and diagnostics;
+- `/v1/...` for the supported OpenAI-compatible inference subset.
+
+`GET /v1/models` contains currently routable models. Last-known offline models
+and per-server availability belong to the management catalog instead. Inference
+placement is automatic unless an authorized caller uses the documented optional
+`X-Model-Highway-Node` header to pin a ready node; a failed pin never silently
+falls back to another node.
 
 ### Node agent
 
-Runs on each participating computer. It reports capabilities and model inventory, maintains a heartbeat, manages local model servers, and exposes readiness and health state.
+Runs on each participating computer. It:
+
+- enrolls with a short-lived, single-use bootstrap token;
+- opens an authenticated outbound SSE command stream;
+- posts heartbeats and atomic inventory snapshots;
+- executes typed, allowlisted runtime operations;
+- reports command acknowledgements and results;
+- enforces local power, schedule, and resource policy.
+
+Commands use IDs, deadlines, idempotency keys, durable outcomes, and defined
+reconnect/replay semantics. The control plane does not become a general remote
+shell.
 
 ### Runtime adapters
 
-Provide a common interface over local serving backends. Planned integrations include llama.cpp, Ollama, MLX LM, and vLLM.
+Provide a common interface over local serving backends. Candidates include
+llama.cpp, Ollama, MLX LM, and vLLM. A fleet feasibility milestone selects one
+real adapter before implementation expands to others.
 
-### Networking
+The catalog separates:
 
-LAN and Tailscale are treated as two paths to the same node identity. Wake-on-LAN is a separate power-management path and may require an always-on relay on the target subnet.
+- global model identity;
+- a model placement on a specific runtime server;
+- timestamped inventory observations;
+- currently loaded and ready serving state.
 
-## Proposed initial stack
+This lets the CLI and future UIs distinguish installed, unloaded, ready, stale,
+offline, absent, and failed models.
+
+### Wake-on-LAN
+
+Tailscale does not directly deliver a subnet-local Wake-on-LAN broadcast to a
+sleeping machine. Model Highway sends the packet directly when the control
+plane has a verified interface on the target subnet. Otherwise it uses an
+authenticated always-on relay on that LAN.
+
+A sleeping or offline node is never directly routable. It may be selected as a
+lifecycle candidate only when policy, capacity, runtime support, a direct or
+relayed wake path, and Wake-on-LAN eligibility are satisfied.
+`offline-unknown` is not treated as proof that a node is sleeping.
+
+## Future native UI
+
+After the CLI and management API are stable, the intended first GUI is a native
+macOS menu-bar application. It should be able to:
+
+- show all registered servers and grey out offline or disabled ones;
+- show the last-known global model catalog;
+- select a server and grey out models unavailable there;
+- display refresh times and failure reasons;
+- follow wake and model-start progress;
+- open a fuller settings and diagnostics window.
+
+Native UIs live in separate repositories and consume the versioned management
+API. Scheduling, authentication, catalog normalization, and lifecycle behavior
+remain in the core service to avoid duplication. A Linux UI can be selected
+later without changing the core architecture.
+
+## Initial stack and repository boundary
 
 - **Go** for the control plane, node agent, and CLI.
-- **HTTP/JSON** for the first control protocol and **SSE** for streaming status/events.
-- **SQLite** for the initial registry, configuration, job state, and audit log.
-- **OpenAI-compatible HTTP** for the client-facing inference gateway.
-- **Tailscale** for private remote connectivity.
-- **launchd** and **systemd** service definitions for macOS and Linux.
+- **HTTP/JSON** for the versioned management protocol.
+- **Server-Sent Events** for outbound agent commands and management events.
+- **SQLite** for registry, observations, configuration, commands, jobs, leases,
+  and append-only audit events.
+- **OpenAI-compatible HTTP/SSE** for the supported inference surface.
+- **Tailscale** for private remote connectivity and service-specific fallback.
+- **launchd** and **systemd** for macOS and Linux service management.
 
-The implementation plan records the assumptions and sequencing: [`docs/PLAN.md`](docs/PLAN.md).
+This core repository contains the daemon, agent, CLI, API schema, adapters,
+packaging, and conformance tests. Future native UI repositories share the API
+contract rather than Go internals or the SQLite schema.
 
 ## Security principles
 
-- Model servers are private by default.
-- Nodes authenticate to the control plane.
+- Management, agent, relay, and inference actions are authenticated.
+- Bootstrap credentials are short-lived, single-use, and node-bound.
+- Long-lived credentials support rotation and revocation.
+- Model and agent endpoints are private by default.
 - Tailscale ACLs constrain remote access.
-- Lifecycle commands are explicit and allowlisted; the gateway does not execute arbitrary shell commands.
-- Wake, start, stop, and routing actions are auditable.
-- Each node can enforce local power and usage policies.
+- LAN and Tailscale trust assumptions are documented explicitly.
+- Lifecycle commands are typed and allowlisted.
+- Secrets are kept out of inventories, logs, and committed configuration.
+- Wake, prepare, start, stop, drain, enrollment, and authorization failures are
+  auditable.
+- Prompt and generated content are not logged by default.
+- Each node retains a local policy boundary even when the control plane requests
+  an operation.
 
-## Repository status
+## Testing approach
 
-This is the initial project scaffold. Documentation is being established before implementation begins.
+The default suite will be hardware-independent and include unit, race,
+protocol-conformance, SQLite restart, CLI subprocess, and hermetic multi-process
+integration tests. Fake agents, runtimes, relays, clocks, and network dialers
+will exercise reconnects, replay, polling freshness, streaming cancellation,
+path fallback, job coalescing, and restart recovery.
 
-Planned top-level structure:
+Real GPU, runtime, Tailscale, service installation, and Wake-on-LAN checks are
+explicit opt-in fleet tests documented separately.
+
+## Planned core repository layout
 
 ```text
 model-highway/
-├── cmd/          # Executables: control plane, node agent, CLI
-├── internal/     # Private application packages
-├── pkg/          # Shared public protocol/types, if needed
-├── docs/         # Design and implementation documentation
-└── README.md
+├── api/          # Versioned management API schema
+├── cmd/          # Control plane, node agent, and CLI
+├── deploy/       # launchd and systemd service definitions
+├── docs/         # Roadmap, ADRs, operations, milestone plans
+├── internal/     # Private core packages
+├── pkg/          # Thin/generated public API client, if needed
+├── scripts/      # Build and release tooling
+├── spikes/       # Isolated feasibility evidence, never production dependencies
+└── tests/        # Hermetic integration harness
 ```
 
-## Development
+## Development status
 
-Development instructions will be added with the first executable milestone. Until then, see [`docs/PLAN.md`](docs/PLAN.md) for the implementation sequence and acceptance criteria.
+The repository is still documentation-only. The next implementation step is
+Milestone 0 in [`docs/PLAN.md`](docs/PLAN.md): architecture ADRs and feasibility
+checks on representative macOS and Linux nodes before the Go foundation is
+created.
