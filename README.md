@@ -258,7 +258,7 @@ model-highway/
 ├── Cargo.lock              # Reproducible dependency resolution
 ├── apps/                   # Control plane, node agent, and CLI binaries
 ├── api/                    # Versioned management API schema
-├── crates/                 # Domain, protocol, persistence, scheduler, runtime
+├── crates/                 # Domain, protocol, persistence, control, runtime
 │   └── integration-tests/  # Hermetic multi-process harness
 ├── deploy/                 # launchd and systemd service definitions
 ├── docs/                   # Roadmap, ADRs, operations, milestone plans
