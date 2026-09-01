@@ -224,6 +224,24 @@ silently wait through a cold boot. Automatic request-triggered wake or loading
 may be added later as an opt-in policy after client timeout and retry behavior
 is proven.
 
+#### Wake decision
+
+Waking is a deliberate lifecycle action, never a side effect of routing. A node
+is a valid wake candidate only when **all** of these hold:
+
+1. it is in `sleeping-confirmed`, or it is in `offline-unknown` **and** its node
+   policy explicitly enables speculative wake;
+2. the node is wake-eligible (WoL configured, not on the never-auto-wake list);
+3. a verified direct WoL path or an authorized relay endpoint exists;
+4. an authorized operator action or an explicitly enabled policy requested the
+   prepare that needs it.
+
+`offline-unknown` on its own is never sufficient: a node that is merely
+unreachable is not woken unless its policy opts in to speculative wake, because
+an unnecessary wake is a real cost on a personal machine. This predicate is
+fixed in ADR-0006 before any wake code is written, so the scheduler, the domain
+state machine, and Milestone 6 share one definition.
+
 ### Retry and streaming rules
 
 - A client cancellation cancels the selected upstream request.
@@ -347,6 +365,24 @@ Important states include:
 - `draining`
 - `failed`
 
+A sleeping node runs no agent, so `sleeping-confirmed` can never be derived from
+the agent stream. It is set only from one of these external observations, and the
+source is recorded on the observation:
+
+- the node's own agent reported an imminent, policy-driven sleep transition
+  before the connection closed (a pre-sleep signal);
+- an out-of-band reachability probe (for example a managed-switch port state,
+  ARP/neighbor liveness, or a configured presence check) declared for that node
+  in configuration confirms it is asleep rather than merely unreachable;
+- a prior successful wake for the same node established that it was previously
+  asleep, until the next contradicting observation.
+
+Absent any such source, a node that stops answering is `offline-unknown`, never
+`sleeping-confirmed`. If a node has no configured sleep-confirmation source, it
+is wake-eligible from `offline-unknown` only when its policy explicitly opts in
+to speculative wake (see the wake decision below); otherwise it is never woken
+automatically.
+
 ### Command and LifecycleOperation
 
 Durable, idempotent control records with status, deadline, attempt count,
@@ -366,11 +402,14 @@ Apply hard constraints before ranking:
 3. node policy and requested explicit node constraint;
 4. installed placement or approved availability source;
 5. sufficient adapter-confirmed capacity when loading is required;
-6. wake eligibility when the node is not online;
+6. wake eligibility per the wake decision when the node is not online, which
+   requires `sleeping-confirmed`, or `offline-unknown` with a policy that opts
+   in to speculative wake;
 7. a verified direct WoL path or known relay endpoint when waking is required.
 
 An offline or sleeping node may be a lifecycle candidate but is never directly
-routable.
+routable. A node in `offline-unknown` without a speculative-wake policy is not a
+wake candidate at all.
 
 ### Stage 2: ready dispatch
 
@@ -539,6 +578,8 @@ foundation.
 - Test WoL through the intended direct or relayed path for each eligible
   device.
 - Record machines that must never be woken automatically.
+- Define the wake predicate and every `sleeping-confirmed` source in ADR-0006,
+  including whether any node opts in to speculative wake from `offline-unknown`.
 - Record cold boot, runtime startup, and model readiness timings.
 - Decide model canonicalization and alias rules.
 
@@ -767,8 +808,11 @@ restart-safe operation.
 - Direct dispatch is allowed only from a verified target-subnet interface and
   records the authorized operator, target, and result in the audit log.
 - Relay calls are authenticated and target-authorized.
-- Offline-unknown is not assumed to mean sleeping.
+- Offline-unknown is not assumed to mean sleeping, and is not woken unless the
+  node policy opts in to speculative wake.
 - A sleeping-confirmed, wakeable node can be planned but not directly routed.
+- `sleeping-confirmed` is only ever set from a source named in ADR-0006, never
+  inferred from an agent timeout alone.
 - Concurrent prepare requests coalesce into one durable operation.
 - Restart recovery does not issue duplicate wake or start commands.
 - Failed, cancelled, and expired operations expose actionable reasons.
