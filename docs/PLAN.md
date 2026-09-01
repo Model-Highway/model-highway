@@ -7,15 +7,18 @@
 > **Goal:** Make a heterogeneous fleet of personal computers behave like one
 > on-demand local LLM serving system, with a useful CLI delivered before any GUI.
 >
-> **Architecture:** A Go control plane exposes a versioned management API and a
-> deliberately limited OpenAI-compatible gateway. Go node agents report runtime
+> **Architecture:** A Rust control plane exposes a versioned management API and a
+> deliberately limited OpenAI-compatible gateway. Rust node agents report runtime
 > and model observations and receive allowlisted lifecycle commands over an
 > authenticated outbound connection. The CLI is the first client of the
-> management API. Native user interfaces may be added later without duplicating
+> management API. A later Tauri desktop client provides the full cross-platform
+> GUI, macOS menu-bar surface, and Linux tray surface without duplicating
 > scheduling or lifecycle policy.
 >
-> **Initial stack:** Go, HTTP/JSON, Server-Sent Events, SQLite,
-> OpenAI-compatible inference APIs, Tailscale, launchd, and systemd.
+> **Initial stack:** Rust, Tokio, Axum, Reqwest, Serde, Clap, tracing,
+> HTTP/JSON, Server-Sent Events, SQLite, OpenAI-compatible inference APIs,
+> Tailscale, launchd, and systemd. The later desktop stack is Tauri 2 with a
+> Svelte/TypeScript frontend.
 
 ## How to use this plan
 
@@ -27,7 +30,7 @@ For each milestone:
 1. Confirm all prerequisite ADRs and earlier acceptance criteria are complete.
 2. Write `docs/plans/NN-<milestone>.md` with exact files and TDD-sized tasks.
 3. Implement one vertical behavior at a time.
-4. Run the milestone's unit, integration, race, and platform checks.
+4. Run the milestone's unit, integration, concurrency, and platform checks.
 5. Update `README.md`, operations documentation, and API schemas to describe
    only behavior that actually works.
 6. Commit in small logical units. Do not push until explicitly authorized.
@@ -53,10 +56,12 @@ The first vertical slice must support:
 - routing one streaming chat-completions request through a ready endpoint;
 - showing actionable unavailability and failure reasons.
 
-### Later UI requirement
+### Later desktop UI requirement
 
-A GUI is deferred until the CLI and management API are stable, but it is not an
-optional product direction. The API must support a later client that can:
+A full cross-platform GUI is deferred until the CLI and management API are
+stable, but it is not an optional product direction. The desktop client starts
+as a normal macOS/Linux application and later adds a macOS menu-bar surface and
+Linux tray surface. The API must support a client that can:
 
 - list all registered servers, retaining offline entries;
 - grey out unreachable or policy-disabled servers;
@@ -66,9 +71,11 @@ optional product direction. The API must support a later client that can:
 - show wake and model-start progress;
 - explain which node served a request and why.
 
-The intended first native client is a macOS menu-bar application. Its source
-should live in a separate repository once the management API is stable. Linux
-UI work may use a separate native or webview client later.
+The desktop client uses Tauri 2 with a Svelte/TypeScript frontend and lives in a
+separate repository once the management API is stable. The full window and
+quick menu-bar/tray surfaces share one frontend state model and API client.
+Small Swift/AppKit or Linux-specific integrations are permitted only where
+Tauri does not provide acceptable platform behavior.
 
 ### Initial functional scope
 
@@ -98,7 +105,7 @@ The first usable core release should:
 - billing, quotas, or multi-tenant scheduling;
 - predictive capacity planning;
 - transparent retry after streaming output begins;
-- implementing macOS or Linux GUI source in the core repository.
+- implementing desktop GUI source in the core repository.
 
 ## Architecture decisions
 
@@ -117,16 +124,22 @@ Use one core repository for:
 - conformance and integration tests;
 - launchd and systemd packaging.
 
-Use separate repositories for native UIs as they materialize. UIs consume a
-versioned management API and contain presentation and OS integration only.
-Scheduling, model normalization, authentication decisions, and lifecycle policy
-remain in the control plane.
+Use a separate repository for the Tauri desktop application. It consumes a
+versioned management API and contains presentation, tray/menu-bar behavior, and
+OS integration only. Scheduling, model normalization, authentication decisions,
+and lifecycle policy remain in the control plane. Share only a versioned Rust
+API-client crate or generated OpenAPI client; do not link the desktop process to
+the scheduler or SQLite implementation.
 
 ### Core implementation language
 
-Use Go for the control plane, node agent, and CLI so protocol types, tests, and
-release tooling can be shared. Milestone 0 records the minimum supported Go
-version and confirms builds on macOS and Linux before feature work begins.
+Use Rust for the control plane, node agent, and CLI in one Cargo workspace so
+domain types, protocol envelopes, API clients, tests, and release tooling can be
+shared. The async stack is Tokio with Axum for servers and Reqwest for clients;
+Serde handles wire formats, Clap the CLI, and tracing structured observability.
+Milestone 0 records the minimum supported Rust version (MSRV), SQLite crate and
+linkage choice, and confirms builds on macOS and Linux before feature work
+begins.
 
 ### Management and agent protocol
 
@@ -419,27 +432,30 @@ job lease recovery, audit retention, and repeated inventory snapshots.
 ## Proposed core repository layout
 
 ```text
-cmd/
-├── model-highway/       # Control plane and inference gateway
-├── model-highway-agent/ # Node agent
-└── model-highwayctl/    # Management CLI
+Cargo.toml               # Cargo workspace manifest
+Cargo.lock               # Reproducible dependency resolution
+apps/
+├── control-plane/       # Control plane and inference gateway binary
+├── agent/               # Node agent binary
+└── cli/                 # model-highwayctl binary
 api/
 └── openapi.yaml         # Versioned management API contract
-internal/
+crates/
 ├── agent/               # Agent client, command stream, and reporting
 ├── api/                 # Management and OpenAI-compatible handlers
+├── api-client/          # Versioned management API client
 ├── auth/                # Enrollment, credentials, and authorization
 ├── catalog/             # Models, placements, observations, and freshness
 ├── config/              # Versioned configuration
 ├── control/             # Scheduling and lifecycle orchestration
-├── observability/       # Structured logs, metrics, tracing hooks
+├── domain/              # Shared IDs, states, and domain types
+├── integration-tests/   # Hermetic multi-process test package
+├── observability/       # tracing setup, metrics, and redaction
 ├── persistence/         # SQLite migrations and repositories
 ├── protocol/            # Agent command/report envelopes
-├── runtime/             # Runtime adapter interface and implementations
+├── runtime/             # Runtime adapter traits and implementations
 ├── transport/           # Per-service LAN/Tailscale path selection
 └── wol/                 # Direct dispatch, magic packets, and relay client/server
-pkg/
-└── apiclient/           # Generated or thin public management client if needed
 deploy/
 ├── launchd/
 └── systemd/
@@ -450,14 +466,12 @@ docs/
 ├── OPERATIONS.md
 ├── adr/
 └── plans/
-tests/
-└── integration/         # Hermetic multi-process harness
 ```
 
-Avoid exporting Go packages solely for hypothetical reuse. The versioned API
-schema, not direct database or internal package access, is the compatibility
-boundary for separate repositories. Spikes must be clearly isolated and must
-not become production dependencies.
+Avoid publishing Rust crates solely for hypothetical reuse. The versioned API
+schema and a narrowly scoped API-client crate—not direct database or scheduler
+crate access—form the compatibility boundary for the desktop repository. Spikes
+must be clearly isolated and must not become production dependencies.
 
 ## Testing strategy
 
@@ -469,7 +483,8 @@ hardware. It includes:
 - unit tests;
 - protocol and OpenAPI conformance tests;
 - SQLite migration and restart tests;
-- `go test -race ./...` where supported;
+- Loom model tests for concurrency-critical command, lease, and job state;
+- optional Miri and sanitizer jobs for suitable crates and supported targets;
 - a hermetic multi-process integration harness;
 - fake agent, runtime, relay, clock, and network dialer;
 - streaming, cancellation, reconnect, replay, and timeout tests;
@@ -513,9 +528,10 @@ foundation.
 
 **Work:**
 
-- Record Go and its minimum supported version.
-- Confirm the selected Go toolchain is available on representative macOS and
+- Record Rust and the minimum supported Rust version (MSRV).
+- Confirm the selected Rust toolchain is available on representative macOS and
   Linux hosts.
+- Select the SQLite crate, migration approach, and static/bundled linkage policy.
 - Confirm the outbound HTTP/SSE agent design with a reconnect prototype.
 - Inventory runtimes on representative fleet nodes.
 - Select the first real runtime adapter.
@@ -543,27 +559,44 @@ broad fleet behavior.
 
 **Files:**
 
-- Create: `go.mod`
+- Create: `Cargo.toml`
+- Create: `Cargo.lock`
 - Create: `docs/plans/01-cli-vertical-slice.md`
 - Create: `api/openapi.yaml`
-- Create: `cmd/model-highway/main.go`
-- Create: `cmd/model-highwayctl/main.go`
-- Create: `internal/api/health.go`
-- Create: `internal/api/nodes.go`
-- Create: `internal/api/catalog.go`
-- Create: `internal/api/gateway.go`
-- Create: `internal/api/lifecycle.go`
-- Create: `internal/auth/operator.go`
-- Create: `internal/control/prepare.go`
-- Create: `internal/runtime/runtime.go`
-- Create: `internal/runtime/fake.go`
-- Create: `pkg/apiclient/client.go`
-- Create: `tests/integration/cli_vertical_slice_test.go`
+- Create: `apps/control-plane/Cargo.toml`
+- Create: `apps/control-plane/src/main.rs`
+- Create: `apps/cli/Cargo.toml`
+- Create: `apps/cli/src/main.rs`
+- Create: `crates/domain/Cargo.toml`
+- Create: `crates/domain/src/lib.rs`
+- Create: `crates/api/Cargo.toml`
+- Create: `crates/api/src/lib.rs`
+- Create: `crates/api/src/health.rs`
+- Create: `crates/api/src/nodes.rs`
+- Create: `crates/api/src/catalog.rs`
+- Create: `crates/api/src/gateway.rs`
+- Create: `crates/api/src/lifecycle.rs`
+- Create: `crates/auth/Cargo.toml`
+- Create: `crates/auth/src/lib.rs`
+- Create: `crates/auth/src/operator.rs`
+- Create: `crates/control/Cargo.toml`
+- Create: `crates/control/src/lib.rs`
+- Create: `crates/control/src/prepare.rs`
+- Create: `crates/observability/Cargo.toml`
+- Create: `crates/observability/src/lib.rs`
+- Create: `crates/runtime/Cargo.toml`
+- Create: `crates/runtime/src/lib.rs`
+- Create: `crates/runtime/src/fake.rs`
+- Create: `crates/api-client/Cargo.toml`
+- Create: `crates/api-client/src/lib.rs`
+- Create: `crates/integration-tests/Cargo.toml`
+- Create: `crates/integration-tests/src/lib.rs`
+- Create: `crates/integration-tests/tests/cli_vertical_slice.rs`
 - Modify: `README.md`
 
 **Task groups for the milestone plan:**
 
-1. Initialize the module and platform build matrix.
+1. Initialize the Cargo workspace, shared lint policy, and platform build matrix.
 2. Define the versioned health, node, catalog, and error schemas.
 3. Add operator authentication and redacted structured logging.
 4. Implement a deterministic fake runtime.
@@ -583,7 +616,8 @@ broad fleet behavior.
   streaming request.
 - Invalid credentials and unavailable models produce stable structured errors.
 - Client cancellation reaches the fake upstream.
-- Unit, race, integration, and macOS/Linux build checks pass.
+- Unit, Loom concurrency, integration, Clippy, rustfmt, and macOS/Linux build
+  checks pass.
 
 ### Milestone 2: Durable registry, enrollment, and agent channel
 
@@ -592,20 +626,29 @@ and restart-safe persistence.
 
 **Files:**
 
-- Create: `cmd/model-highway-agent/main.go`
+- Create: `apps/agent/Cargo.toml`
+- Create: `apps/agent/src/main.rs`
 - Create: `docs/plans/02-agent-and-registry.md`
-- Create: `internal/agent/client.go`
-- Create: `internal/agent/command_stream.go`
-- Create: `internal/agent/reporter.go`
-- Create: `internal/auth/bootstrap.go`
-- Create: `internal/auth/nodes.go`
-- Create: `internal/persistence/migrations/`
-- Create: `internal/persistence/nodes.go`
-- Create: `internal/persistence/config.go`
-- Create: `internal/persistence/commands.go`
-- Create: `internal/persistence/audit.go`
-- Create: `internal/protocol/commands.go`
-- Create: `tests/integration/agent_reconnect_test.go`
+- Create: `crates/agent/Cargo.toml`
+- Create: `crates/agent/src/lib.rs`
+- Create: `crates/agent/src/client.rs`
+- Create: `crates/agent/src/command_stream.rs`
+- Create: `crates/agent/src/reporter.rs`
+- Create: `crates/auth/src/bootstrap.rs`
+- Create: `crates/auth/src/nodes.rs`
+- Create: `crates/config/Cargo.toml`
+- Create: `crates/config/src/lib.rs`
+- Create: `crates/persistence/Cargo.toml`
+- Create: `crates/persistence/src/lib.rs`
+- Create: `crates/persistence/migrations/`
+- Create: `crates/persistence/src/nodes.rs`
+- Create: `crates/persistence/src/config.rs`
+- Create: `crates/persistence/src/commands.rs`
+- Create: `crates/persistence/src/audit.rs`
+- Create: `crates/protocol/Cargo.toml`
+- Create: `crates/protocol/src/lib.rs`
+- Create: `crates/protocol/src/commands.rs`
+- Create: `crates/integration-tests/tests/agent_reconnect.rs`
 
 **Acceptance criteria:**
 
@@ -624,16 +667,18 @@ needed by both the CLI and future UIs.
 
 **Files:**
 
-- Create: `internal/catalog/models.go`
+- Create: `crates/catalog/Cargo.toml`
+- Create: `crates/catalog/src/lib.rs`
+- Create: `crates/catalog/src/models.rs`
 - Create: `docs/plans/03-catalog-and-runtime.md`
-- Create: `internal/catalog/placements.go`
-- Create: `internal/catalog/freshness.go`
-- Create: `internal/catalog/refresh.go`
-- Create: `internal/runtime/<selected_adapter>.go`
-- Create: `internal/runtime/<selected_adapter>_test.go`
-- Create: `internal/persistence/catalog.go`
-- Create: `tests/integration/catalog_refresh_test.go`
-- Modify: `cmd/model-highwayctl/main.go`
+- Create: `crates/catalog/src/placements.rs`
+- Create: `crates/catalog/src/freshness.rs`
+- Create: `crates/catalog/src/refresh.rs`
+- Create: `crates/runtime/src/adapters/<selected_adapter>.rs`
+- Create: `crates/runtime/tests/<selected_adapter>.rs`
+- Create: `crates/persistence/src/catalog.rs`
+- Create: `crates/integration-tests/tests/catalog_refresh.rs`
+- Modify: `apps/cli/src/main.rs`
 
 **Acceptance criteria:**
 
@@ -655,13 +700,13 @@ control.
 
 **Files:**
 
-- Create: `internal/control/eligibility.go`
+- Create: `crates/control/src/eligibility.rs`
 - Create: `docs/plans/04-multi-node-scheduling.md`
-- Create: `internal/control/scheduler.go`
-- Create: `internal/control/selection_reason.go`
-- Create: `internal/control/capacity.go`
-- Create: `internal/persistence/leases.go`
-- Create: `tests/integration/multi_node_routing_test.go`
+- Create: `crates/control/src/scheduler.rs`
+- Create: `crates/control/src/selection_reason.rs`
+- Create: `crates/control/src/capacity.rs`
+- Create: `crates/persistence/src/leases.rs`
+- Create: `crates/integration-tests/tests/multi_node_routing.rs`
 
 **Acceptance criteria:**
 
@@ -679,12 +724,14 @@ runtime, gateway, and relay traffic.
 
 **Files:**
 
-- Create: `internal/transport/endpoints.go`
+- Create: `crates/transport/Cargo.toml`
+- Create: `crates/transport/src/lib.rs`
+- Create: `crates/transport/src/endpoints.rs`
 - Create: `docs/plans/05-network-paths.md`
-- Create: `internal/transport/reachability.go`
-- Create: `internal/transport/selector.go`
-- Create: `internal/transport/selector_test.go`
-- Create: `tests/integration/path_fallback_test.go`
+- Create: `crates/transport/src/reachability.rs`
+- Create: `crates/transport/src/selector.rs`
+- Create: `crates/transport/tests/selector.rs`
+- Create: `crates/integration-tests/tests/path_fallback.rs`
 
 **Acceptance criteria:**
 
@@ -702,15 +749,17 @@ restart-safe operation.
 
 **Files:**
 
-- Create: `internal/control/lifecycle.go`
+- Create: `crates/wol/Cargo.toml`
+- Create: `crates/wol/src/lib.rs`
+- Create: `crates/control/src/lifecycle.rs`
 - Create: `docs/plans/06-lifecycle-and-wol.md`
-- Create: `internal/control/jobs.go`
-- Create: `internal/persistence/jobs.go`
-- Create: `internal/wol/magic_packet.go`
-- Create: `internal/wol/direct.go`
-- Create: `internal/wol/relay.go`
-- Create: `internal/wol/magic_packet_test.go`
-- Create: `tests/integration/wake_and_prepare_test.go`
+- Create: `crates/control/src/jobs.rs`
+- Create: `crates/persistence/src/jobs.rs`
+- Create: `crates/wol/src/magic_packet.rs`
+- Create: `crates/wol/src/direct.rs`
+- Create: `crates/wol/src/relay.rs`
+- Create: `crates/wol/tests/magic_packet.rs`
+- Create: `crates/integration-tests/tests/wake_and_prepare.rs`
 
 **Acceptance criteria:**
 
@@ -735,7 +784,7 @@ restart-safe operation.
 - Create: `docs/plans/07-hardening-and-packaging.md`
 - Create: `deploy/systemd/model-highway-agent.service`
 - Create: `scripts/build-release.sh`
-- Create: `tests/integration/README.md`
+- Create: `crates/integration-tests/README.md`
 - Modify: `docs/OPERATIONS.md`
 - Modify: `README.md`
 
@@ -750,17 +799,17 @@ restart-safe operation.
 - Default CI remains hardware-independent.
 - README claims match the behavior actually released.
 
-### Milestone 8: UI-ready management contract and native client handoff
+### Milestone 8: UI-ready management contract and desktop client handoff
 
-**Objective:** Freeze the management semantics needed for separate native UI
-repositories without moving orchestration logic into those clients.
+**Objective:** Freeze the management semantics needed by the separate Tauri
+desktop repository without moving orchestration logic into that client.
 
 **Files:**
 
 - Modify: `api/openapi.yaml`
 - Create: `docs/plans/08-ui-contract.md`
 - Create: `docs/UI_CONTRACT.md`
-- Create: `tests/integration/ui_contract_test.go`
+- Create: `crates/integration-tests/tests/ui_contract.rs`
 - Create: `docs/adr/0007-client-version-compatibility.md`
 
 **Acceptance criteria:**
@@ -768,11 +817,86 @@ repositories without moving orchestration logic into those clients.
 - The contract represents offline servers and last-known models.
 - It represents per-server availability and exact grey-out reasons.
 - Event streaming covers inventory, connectivity, lifecycle, and request state.
-- A generated or thin native client passes conformance fixtures.
+- The versioned Rust API-client crate and generated TypeScript fixtures pass
+  conformance tests.
 - Compatibility and release rules between core and UI repositories are
   documented.
-- The macOS menu-bar repository can begin without duplicating scheduler,
+- The Tauri desktop repository can begin without duplicating scheduler,
   lifecycle, authentication, or catalog logic.
+
+### Milestone 9: Full cross-platform desktop GUI
+
+**Objective:** Deliver the normal-window macOS/Linux application before adding
+menu-bar or tray-specific interaction.
+
+**Repository:** `model-highway-desktop` (separate from the core repository)
+
+**Files:**
+
+- Create: `model-highway-desktop/package.json`
+- Create: `model-highway-desktop/src/` (Svelte/TypeScript application)
+- Create: `model-highway-desktop/src/lib/stores/cluster.ts`
+- Create: `model-highway-desktop/src/lib/components/ServerPicker.svelte`
+- Create: `model-highway-desktop/src/lib/components/ModelPicker.svelte`
+- Create: `model-highway-desktop/src-tauri/Cargo.toml`
+- Create: `model-highway-desktop/src-tauri/src/lib.rs`
+- Create: `model-highway-desktop/src-tauri/src/api_client.rs`
+- Create: `model-highway-desktop/tests/` (frontend and API-contract fixtures)
+
+**Architecture:**
+
+- The Rust Tauri shell owns credential storage, management-API calls, and the
+  long-lived management event stream.
+- The Svelte frontend receives typed state and events through narrow Tauri
+  commands/events.
+- The desktop process is a client only. Closing or restarting it must not stop
+  the control plane, agents, lifecycle jobs, or inference streams.
+- The desktop repository consumes a versioned release of the Rust API-client
+  crate or a generated client; it never imports scheduler or persistence crates.
+
+**Acceptance criteria:**
+
+- Signed/development builds launch as normal windows on supported macOS and
+  Linux targets.
+- The server picker retains offline and disabled nodes with exact grey-out
+  reasons.
+- The model picker shows the global last-known catalog and per-server
+  availability.
+- Lifecycle operations display progress, cancellation, failure, and final state.
+- Settings and diagnostics cover connectivity, refresh timestamps, selected
+  paths, and structured rejection reasons.
+- Frontend tests and desktop API-contract fixtures run without a real fleet.
+- Quitting the desktop client leaves the independently managed core services
+  running.
+
+### Milestone 10: macOS menu bar and Linux tray
+
+**Objective:** Add quick-control surfaces to the same Tauri desktop application
+without creating separate product logic or background services.
+
+**Files:**
+
+- Create: `model-highway-desktop/src-tauri/src/tray.rs`
+- Create: `model-highway-desktop/src-tauri/src/platform/macos.rs`
+- Create: `model-highway-desktop/src-tauri/src/platform/linux.rs`
+- Create: `model-highway-desktop/src/lib/components/QuickControl.svelte`
+- Create: `model-highway-desktop/tests/tray/`
+
+**Acceptance criteria:**
+
+- macOS uses an adaptive template menu-bar icon and can open quick controls or
+  the full dashboard.
+- Linux provides a tray/status icon and menu on the explicitly supported
+  desktop environments.
+- The documented Linux support matrix records desktop-environment limitations,
+  left/right-click behavior, and any required status-notifier packages.
+- Quick controls reuse the same server/model stores and lifecycle API as the
+  full window.
+- Tray/menu-bar actions cannot bypass authorization or local node policy.
+- Hiding or closing the last window preserves the tray client when configured;
+  quitting the tray exits only the desktop client, not Model Highway services.
+- Platform-specific Swift/AppKit or Linux code is isolated behind narrow Rust
+  interfaces and is added only when Tauri behavior is insufficient.
 
 ## Remaining product decisions
 
@@ -782,19 +906,20 @@ These do not block the foundation and can be resolved at the named milestone:
 2. Default idle-unload policy — Milestone 6 or later.
 3. Whether automatic request-triggered prepare is ever enabled — after
    Milestone 6 evidence.
-4. The first Linux GUI toolkit — after the UI contract is stable.
+4. Exact Tauri Linux tray behavior and desktop-environment support matrix —
+   during desktop-client implementation.
 5. Whether additional OpenAI-compatible endpoints such as Responses or
    embeddings enter a later release.
 
 ## Verification commands
 
-These become authoritative when the Go module exists:
+These become authoritative when the Cargo workspace exists:
 
 ```bash
-go test ./...
-go test -race ./...
-go vet ./...
-go build ./...
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+cargo test --workspace --all-features
+cargo build --workspace --all-targets
 ```
 
 Milestone plans must add exact targeted commands and expected output. Real GPU,

@@ -28,10 +28,11 @@ The project is deliberately **CLI first**:
 3. add authenticated agents, durable state, and model polling;
 4. add multi-node scheduling, LAN/Tailscale selection, and lifecycle control;
 5. stabilize the management API;
-6. build native UIs in separate repositories.
+6. build a cross-platform Tauri desktop client in a separate repository;
+7. add macOS menu-bar and Linux tray surfaces to that desktop client.
 
-The CLI is the first client of the same versioned management API that future
-native clients will use. It will not bypass the API to read the database or
+The CLI is the first client of the same versioned management API that the future
+desktop client will use. It will not bypass the API to read the database or
 reuse control-plane internals.
 
 See [`docs/PLAN.md`](docs/PLAN.md) for decisions, milestone gates, acceptance
@@ -181,26 +182,32 @@ lifecycle candidate only when policy, capacity, runtime support, a direct or
 relayed wake path, and Wake-on-LAN eligibility are satisfied.
 `offline-unknown` is not treated as proof that a node is sleeping.
 
-## Future native UI
+## Future desktop UI
 
-After the CLI and management API are stable, the intended first GUI is a native
-macOS menu-bar application. It should be able to:
+After the CLI and management API are stable, the next product surface is a full
+cross-platform desktop application for macOS and Linux. It should be able to:
 
 - show all registered servers and grey out offline or disabled ones;
 - show the last-known global model catalog;
 - select a server and grey out models unavailable there;
 - display refresh times and failure reasons;
 - follow wake and model-start progress;
-- open a fuller settings and diagnostics window.
+- provide full settings and diagnostics views.
 
-Native UIs live in separate repositories and consume the versioned management
-API. Scheduling, authentication, catalog normalization, and lifecycle behavior
-remain in the core service to avoid duplication. A Linux UI can be selected
-later without changing the core architecture.
+The desktop application uses Tauri 2 with a Svelte/TypeScript frontend. After
+the full dashboard is stable, the same application adds a macOS menu-bar surface
+and Linux tray surface for quick status, server/model selection, prepare, and
+dashboard access. It lives in a separate repository and consumes the versioned
+management API. Scheduling, authentication, catalog normalization, and lifecycle
+behavior remain in the core service to avoid duplication. Small Swift/AppKit or
+Linux-specific integrations are allowed only when Tauri cannot provide adequate
+platform behavior.
 
 ## Initial stack and repository boundary
 
-- **Go** for the control plane, node agent, and CLI.
+- **Rust** for the control plane, node agent, and CLI.
+- **Tokio**, **Axum**, **Reqwest**, **Serde**, **Clap**, and **tracing** for the
+  asynchronous core, APIs, CLI, wire formats, and observability.
 - **HTTP/JSON** for the versioned management protocol.
 - **Server-Sent Events** for outbound agent commands and management events.
 - **SQLite** for registry, observations, configuration, commands, jobs, leases,
@@ -208,10 +215,13 @@ later without changing the core architecture.
 - **OpenAI-compatible HTTP/SSE** for the supported inference surface.
 - **Tailscale** for private remote connectivity and service-specific fallback.
 - **launchd** and **systemd** for macOS and Linux service management.
+- **Tauri 2 + Svelte/TypeScript** for the later full GUI and menu-bar/tray
+  surfaces.
 
 This core repository contains the daemon, agent, CLI, API schema, adapters,
-packaging, and conformance tests. Future native UI repositories share the API
-contract rather than Go internals or the SQLite schema.
+packaging, and conformance tests. The desktop repository shares the API contract
+and a narrowly scoped versioned API-client crate rather than Rust scheduler
+crates or the SQLite schema.
 
 ## Security principles
 
@@ -231,7 +241,7 @@ contract rather than Go internals or the SQLite schema.
 
 ## Testing approach
 
-The default suite will be hardware-independent and include unit, race,
+The default suite will be hardware-independent and include unit, concurrency,
 protocol-conformance, SQLite restart, CLI subprocess, and hermetic multi-process
 integration tests. Fake agents, runtimes, relays, clocks, and network dialers
 will exercise reconnects, replay, polling freshness, streaming cancellation,
@@ -244,20 +254,21 @@ explicit opt-in fleet tests documented separately.
 
 ```text
 model-highway/
-├── api/          # Versioned management API schema
-├── cmd/          # Control plane, node agent, and CLI
-├── deploy/       # launchd and systemd service definitions
-├── docs/         # Roadmap, ADRs, operations, milestone plans
-├── internal/     # Private core packages
-├── pkg/          # Thin/generated public API client, if needed
-├── scripts/      # Build and release tooling
-├── spikes/       # Isolated feasibility evidence, never production dependencies
-└── tests/        # Hermetic integration harness
+├── Cargo.toml              # Rust workspace manifest
+├── Cargo.lock              # Reproducible dependency resolution
+├── apps/                   # Control plane, node agent, and CLI binaries
+├── api/                    # Versioned management API schema
+├── crates/                 # Domain, protocol, persistence, scheduler, runtime
+│   └── integration-tests/  # Hermetic multi-process harness
+├── deploy/                 # launchd and systemd service definitions
+├── docs/                   # Roadmap, ADRs, operations, milestone plans
+├── scripts/                # Build and release tooling
+└── spikes/                 # Isolated feasibility evidence
 ```
 
 ## Development status
 
 The repository is still documentation-only. The next implementation step is
 Milestone 0 in [`docs/PLAN.md`](docs/PLAN.md): architecture ADRs and feasibility
-checks on representative macOS and Linux nodes before the Go foundation is
+checks on representative macOS and Linux nodes before the Rust foundation is
 created.
