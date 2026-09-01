@@ -167,8 +167,8 @@ The catalog separates:
 - timestamped inventory observations;
 - currently loaded and ready serving state.
 
-This lets the CLI and future UIs distinguish installed, unloaded, ready, stale,
-offline, absent, and failed models.
+This lets the CLI and future UIs distinguish the canonical placement states:
+absent, installed, loading, ready, busy, stale, unavailable, and failed.
 
 ### Wake-on-LAN
 
