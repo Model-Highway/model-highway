@@ -131,6 +131,13 @@ and lifecycle policy remain in the control plane. Share only a versioned Rust
 API-client crate or generated OpenAPI client; do not link the desktop process to
 the scheduler or SQLite implementation.
 
+The desktop repository obtains the `api-client` crate without publishing it to
+crates.io: it depends on the crate by a Git tag that matches an OpenAPI schema
+version (a pinned `git`/`tag` Cargo dependency), and the TypeScript types are
+generated from the same tagged `api/openapi.yaml`. ADR-0001 fixes this exact
+mechanism — tag scheme, version-to-schema mapping, and whether a generated
+client is used instead of the crate — before the desktop repository begins.
+
 ### Core implementation language
 
 Use Rust for the control plane, node agent, and CLI in one Cargo workspace so
@@ -507,10 +514,11 @@ docs/
 └── plans/
 ```
 
-Avoid publishing Rust crates solely for hypothetical reuse. The versioned API
-schema and a narrowly scoped API-client crate—not direct database or scheduler
-crate access—form the compatibility boundary for the desktop repository. Spikes
-must be clearly isolated and must not become production dependencies.
+Avoid publishing Rust crates to crates.io solely for hypothetical reuse. The
+versioned API schema and a narrowly scoped API-client crate consumed by Git
+tag—not direct database or scheduler crate access—form the compatibility
+boundary for the desktop repository. Spikes must be clearly isolated and must
+not become production dependencies.
 
 ## Testing strategy
 
@@ -657,8 +665,10 @@ broad fleet behavior.
   streaming request.
 - Invalid credentials and unavailable models produce stable structured errors.
 - Client cancellation reaches the fake upstream.
-- Unit, Loom concurrency, integration, Clippy, rustfmt, and macOS/Linux build
-  checks pass.
+- Unit, integration, Clippy, rustfmt, and macOS/Linux build checks pass. Loom
+  concurrency tests apply only once concurrent shared-memory state exists
+  (command, lease, and job state in Milestones 2, 4, and 6); M1 has no such
+  state and does not gate on Loom.
 
 ### Milestone 2: Durable registry, enrollment, and agent channel
 
@@ -862,7 +872,8 @@ desktop repository without moving orchestration logic into that client.
 - It represents per-server availability and exact grey-out reasons.
 - Event streaming covers inventory, connectivity, lifecycle, and request state.
 - The versioned Rust API-client crate and generated TypeScript fixtures pass
-  conformance tests.
+  conformance tests, both produced from the same tagged `api/openapi.yaml` per
+  ADR-0001.
 - Compatibility and release rules between core and UI repositories are
   documented.
 - The Tauri desktop repository can begin without duplicating scheduler,
