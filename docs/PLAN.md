@@ -212,7 +212,11 @@ for context. This node-vs-server distinction is fixed in ADR-0004.
 
 The API schema is checked into the core repository as OpenAPI or an equivalent
 machine-readable contract. CLI and future UI clients must pass compatibility
-and conformance tests against it.
+and conformance tests against it. The core repository owns code generation from
+`api/openapi.yaml`: it emits the versioned Rust `api-client` crate and the
+TypeScript type definitions and fixtures the desktop repository consumes. A
+`scripts/` generator run in core CI keeps both in sync with each schema tag, so
+the desktop repository never hand-writes types or runs its own generator.
 
 For callers that need to pin inference to a ready node, the gateway accepts the
 documented optional `X-Model-Highway-Node` request header. Without it, placement
@@ -439,7 +443,10 @@ Apply hard constraints before ranking:
 2. runtime and model compatibility;
 3. node policy and requested explicit node constraint;
 4. installed placement or approved availability source;
-5. sufficient adapter-confirmed capacity when loading is required;
+5. sufficient adapter-confirmed capacity when loading is required, treated as a
+   last-known estimate for planning only and re-verified from a fresh
+   post-wake observation before model-load commits, since free memory on a
+   shared personal machine can change between snapshots;
 6. wake eligibility per the wake decision when the node is not online, which
    requires `sleeping-confirmed`, or `offline-unknown` with a policy that opts
    in to speculative wake;
@@ -861,6 +868,9 @@ restart-safe operation.
 - A sleeping-confirmed, wakeable node can be planned but not directly routed.
 - `sleeping-confirmed` is only ever set from a source named in ADR-0006, never
   inferred from an agent timeout alone.
+- Capacity is re-verified from a fresh post-wake observation before model-load
+  commits; a node whose free memory dropped since the last snapshot fails the
+  prepare with an actionable reason rather than over-committing.
 - Concurrent prepare requests coalesce into one durable operation.
 - Restart recovery does not issue duplicate wake or start commands.
 - Failed, cancelled, and expired operations expose actionable reasons.
@@ -902,6 +912,8 @@ desktop repository without moving orchestration logic into that client.
 - Create: `docs/plans/08-ui-contract.md`
 - Create: `docs/UI_CONTRACT.md`
 - Create: `crates/integration-tests/tests/ui_contract.rs`
+- Create: `scripts/generate-clients.sh` (emits the api-client crate and
+  TypeScript types/fixtures from `api/openapi.yaml`)
 - Create: `docs/adr/0007-client-version-compatibility.md`
 
 **Acceptance criteria:**
