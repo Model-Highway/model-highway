@@ -67,7 +67,8 @@ Linux tray surface. The API must support a client that can:
 - grey out unreachable or policy-disabled servers;
 - show a last-known global model catalog;
 - select a server and grey out models unavailable on that server;
-- display installed, loading, ready, busy, stale, and failed states;
+- display the canonical `PlacementAvailability` states
+  (absent/installed/loading/ready/busy/stale/unavailable/failed);
 - show wake and model-start progress;
 - explain which node served a request and why.
 
@@ -193,12 +194,21 @@ The management API retains last-known state. Initial resources include:
 - `GET /api/v1/nodes`
 - `GET /api/v1/nodes/{id}`
 - `GET /api/v1/servers`
+- `GET /api/v1/servers/{id}`
 - `GET /api/v1/catalog/models`
 - `POST /api/v1/catalog/refresh`
 - `POST /api/v1/bootstrap-tokens`
 - `POST /api/v1/lifecycle/prepare`
 - `GET /api/v1/lifecycle/operations/{id}`
 - `GET /api/v1/events`
+
+A **node** is one physical computer (identity and policy); a **server** is one
+`RuntimeServer` — a runtime installation on a node. `/api/v1/nodes` lists
+computers; `/api/v1/servers` lists runtime installations and each carries its
+owning `node_id`. The unit a user selects for inference is the **server**
+(`RuntimeServer`), because a model is served by a runtime, not by a bare
+computer; the UI `ServerPicker` selects a `RuntimeServer` and displays its node
+for context. This node-vs-server distinction is fixed in ADR-0004.
 
 The API schema is checked into the core repository as OpenAPI or an equivalent
 machine-readable contract. CLI and future UI clients must pass compatibility
@@ -347,7 +357,27 @@ A model available through one runtime server:
 - installed, loaded, and ready observations;
 - memory estimate and adapter-reported requirements;
 - last successful and last attempted verification time;
-- current availability reason.
+- current availability, drawn from the canonical `PlacementAvailability` enum
+  below, plus a human-readable reason.
+
+#### Canonical `PlacementAvailability`
+
+Every placement-level state in this plan — including in milestone acceptance
+criteria and UI grey-out reasons — uses exactly these values and no synonyms:
+
+- `absent` — no installed placement is known on this server;
+- `installed` — present on disk but not loaded;
+- `loading` — model load in progress;
+- `ready` — loaded, healthy, and routable;
+- `busy` — ready but at its concurrency limit;
+- `stale` — last-known ready observation is older than the freshness threshold;
+- `unavailable` — the server or node is offline/disabled/unhealthy, so the
+  placement is not routable even though it may remain in last-known history;
+- `failed` — the most recent load or verification attempt failed.
+
+"offline" and "absent" are not interchangeable: an offline *server* makes its
+placements `unavailable`, while `absent` means the model is not installed there.
+ADR-0004 fixes this enum; no milestone may introduce a new placement term.
 
 ### InventoryObservation
 
@@ -355,7 +385,8 @@ A timestamped atomic agent report. The control plane retains last-known
 observations and derives freshness; it never rewrites historical facts to imply
 that an offline node is known to be sleeping.
 
-Important states include:
+These are **node/server reachability** states, distinct from the
+`PlacementAvailability` enum above. Important states include:
 
 - `never-checked`
 - `online`
@@ -590,6 +621,8 @@ foundation.
   including whether any node opts in to speculative wake from `offline-unknown`.
 - Record cold boot, runtime startup, and model readiness timings.
 - Decide model canonicalization and alias rules.
+- Fix the node-vs-server selection unit and the canonical `PlacementAvailability`
+  enum in ADR-0004 so no later milestone coins placement or selection terms.
 
 **Acceptance criteria:**
 
@@ -734,7 +767,8 @@ needed by both the CLI and future UIs.
 **Acceptance criteria:**
 
 - The catalog distinguishes global model identity from node placement.
-- It distinguishes installed, loaded, ready, stale, offline, absent, and failed.
+- It distinguishes the canonical `PlacementAvailability` states: `absent`,
+  `installed`, `loading`, `ready`, `busy`, `stale`, `unavailable`, and `failed`.
 - Refresh is bounded, jittered, and single-flight.
 - A successful inventory snapshot replaces current observations atomically.
 - A failed poll retains last-known state with a visible failure reason.
