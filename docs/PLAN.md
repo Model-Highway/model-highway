@@ -562,7 +562,8 @@ hardware. It includes:
 - protocol and OpenAPI conformance tests;
 - SQLite migration and restart tests;
 - Loom model tests for concurrency-critical command, lease, and job state;
-- optional Miri and sanitizer jobs for suitable crates and supported targets;
+- optional Miri and sanitizer jobs for FFI-free, I/O-free crates (in practice
+  `domain` and `protocol`; not `persistence`, which links SQLite);
 - a hermetic multi-process integration harness;
 - fake agent, runtime, relay, clock, and network dialer;
 - streaming, cancellation, reconnect, replay, and timeout tests;
@@ -642,7 +643,7 @@ broad fleet behavior.
 **Files:**
 
 - Create: `Cargo.toml`
-- Create: `Cargo.lock`
+- Generated: `Cargo.lock` (committed, not hand-authored)
 - Create: `docs/plans/01-cli-vertical-slice.md`
 - Create: `api/openapi.yaml`
 - Create: `apps/control-plane/Cargo.toml`
@@ -684,7 +685,10 @@ broad fleet behavior.
 4. Implement a deterministic fake runtime.
 5. Implement an in-memory single-node management service.
 6. Implement `config init`, `health`, `nodes add/list/describe`, and
-   `models list` through the API client.
+   `models list` through the API client. `config init` writes only CLI-local
+   client configuration (endpoint and operator token) to disk; it does not use
+   the control-plane `crates/config` crate, which is introduced in Milestone 2
+   for server-side versioned configuration.
 7. Implement a minimal `serve <node> <model>` prepare operation against the
    fake runtime and expose its operation state through the API.
 8. Proxy one streaming and one non-streaming chat request, including an
@@ -1009,6 +1013,22 @@ cargo fmt --all -- --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo test --workspace --all-features
 cargo build --workspace --all-targets
+```
+
+Loom runs as a separate build, not a Cargo feature, because it is a
+`cfg(loom)` model check of concurrency-critical command, lease, and job state
+from Milestone 2 onward:
+
+```bash
+RUSTFLAGS="--cfg loom" cargo test --workspace --tests
+```
+
+Miri and sanitizers apply only to crates without FFI or real I/O — in practice
+`domain` and `protocol`; `persistence` cannot run under Miri because it links
+SQLite. Run them per suitable crate:
+
+```bash
+cargo +nightly miri test -p domain -p protocol
 ```
 
 Milestone plans must add exact targeted commands and expected output. Real GPU,
